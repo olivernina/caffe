@@ -43,6 +43,10 @@ class Captioner():
       raise Exception('Invalid vocab file: contains %d words; '
           'net expects vocab with %d words' % (len(self.vocab), net_vocab_size))
 
+    self.lstm_net_proto = lstm_net_proto
+    self.weights_path = weights_path
+    self.phase = phase
+
   def set_image_batch_size(self, batch_size):
     self.image_net.blobs['data'].reshape(batch_size,
         *self.image_net.blobs['data'].data.shape[1:])
@@ -278,6 +282,8 @@ class Captioner():
         outputs.append(output)
     return outputs
 
+
+
   def sample_captions(self, descriptor, prob_output_name='probs',
                       pred_output_name='predict', temp=1, max_length=50):
     descriptor = np.array(descriptor)
@@ -309,6 +315,7 @@ class Captioner():
                   input_sentence=word_input)
       if temp == 1.0 or temp == float('inf'):
         net_output_probs = net.blobs[prob_output_name].data[0]
+
         samples = [
             random_choice_from_probs(dist, temp=temp, already_softmaxed=True)
             for dist in net_output_probs
@@ -332,6 +339,196 @@ class Captioner():
       caption_index += 1
     sys.stdout.write('\n')
     return output_captions, output_probs
+
+  def get_top_words(self, preds):
+      top_num = 2
+      vocabulary = [line.split('\n')[0] for line in file('/home/ninaoa1/Projects/caffedesc/examples/coco_caption/h5_data/buffer_100/vocabulary.txt')]
+      probs = np.copy(preds[0])
+      indx_words = probs.argsort()[-top_num:][::-1]
+      probs.sort()
+      prob_words = probs[-top_num:][::-1]
+      max_words = [  vocabulary[j-1] for j in indx_words]
+      return max_words, indx_words, prob_words
+
+  def traverse(self,max_length,prob,caption_index,image_features,cont_input,word_input,net):
+
+
+    if caption_index < max_length :
+
+      net.forward(image_features=image_features, cont_sentence=cont_input, input_sentence=word_input)
+      net_output_probs = net.blobs['probs'].data[0]
+      topwords, idx_words, prob_words = self.get_top_words(net_output_probs)
+
+      tprob = np.zeros(len(topwords))
+      tword = [[]for i in range(len(topwords))]
+      for i,word in enumerate(idx_words):
+
+        word_input[0, 0] = word
+
+        if word !=0:
+          pred = self.traverse(max_length,prob_words[i],caption_index+1,image_features,cont_input,word_input,net)
+          tprob[i] = prob +pred[0]
+          tword[i] = topwords[i] + ' ' + pred[1]
+
+        else:
+            tprob[i] = prob
+            tword[i] = ' '
+            continue
+
+      return tprob[tprob.argmax()],tword[tprob.argmax()]#,tword[tprob.argmax()],P
+
+
+    else:
+      return prob,' '
+
+
+  def traverse2(self,max_length,prob,caption_index,image_features,cont_input,word_input,net,i):
+
+      # tprob = np.zeros(max_length)
+      # tword = [[]for i in range(max_length)]
+      tprob = 0
+      tword = ''
+      while caption_index < max_length :
+
+        net.forward(image_features=image_features, cont_sentence=cont_input, input_sentence=word_input)
+        net_output_probs = net.blobs['probs'].data[0]
+        topwords, idx_words, prob_words = self.get_top_words(net_output_probs)
+
+        if caption_index==0:
+          tprob = prob +prob_words[i]
+
+          if idx_words[i]==0:
+            tword = tword + ' '
+          else:
+            tword = tword + ' ' +topwords[i]
+
+          word_input[0, 0] = idx_words[i]
+
+        else:
+          tprob = prob +prob_words[0]
+
+          if idx_words[i]==0:
+            tword = tword + ' '
+          else:
+            tword = tword + ' ' +topwords[i]
+
+          word_input[0, 0] = idx_words[0]
+
+        caption_index += 1
+        cont_input[:] = 1
+
+        if word_input[0, 0] ==0:
+          return tprob ,tword
+
+
+      return tprob ,tword
+
+  def sample_captions2(self, descriptor, prob_output_name='probs',
+                      pred_output_name='predict', temp=1, max_length=50):
+    descriptor = np.array(descriptor)
+    batch_size = descriptor.shape[0]
+    self.set_caption_batch_size(batch_size)
+    net = self.lstm_net
+    cont_input = np.zeros_like(net.blobs['cont_sentence'].data)
+    word_input = np.zeros_like(net.blobs['input_sentence'].data)
+    image_features = np.zeros_like(net.blobs['image_features'].data)
+    image_features[:] = descriptor
+    outputs = []
+    output_captions = [[] for b in range(batch_size)]
+    output_probs = [[] for b in range(batch_size)]
+    caption_index = 0
+    num_done = 0
+    cont_input[:] = 0
+    word_input[:] = 0
+
+    net.forward(image_features=image_features, cont_sentence=cont_input, input_sentence=word_input)
+    cont_input[:] = 1
+
+    net_output_probs = net.blobs['probs'].data[0]
+    topwords, idx_words, prob_words = self.get_top_words(net_output_probs)
+
+    tprob = np.zeros(len(topwords))
+    tword = [[]for i in range(len(topwords))]
+    for i,word in enumerate(idx_words):
+
+      word_input[0, 0] = word
+
+      pred = self.traverse(15,0,caption_index+1,image_features,cont_input,word_input,net)
+
+      tprob[i] = pred[0]
+
+      if idx_words[i]>0:
+        tword[i] = topwords[i] +' ' + pred[1]
+      else:
+        tword[i] = pred[1]
+
+      self.lstm_net = caffe.Net(self.lstm_net_proto, self.weights_path, self.phase)
+      self.set_caption_batch_size(batch_size)
+      net = self.lstm_net
+
+    print tprob
+    print tword
+    sys.stdout.write('\n')
+
+    return tword[tprob.argmax()],tprob[tprob.argmax()]
+
+
+  def sample_captions3(self, descriptor, prob_output_name='probs',
+                      pred_output_name='predict', temp=1, max_length=50):
+    descriptor = np.array(descriptor)
+    batch_size = descriptor.shape[0]
+    self.set_caption_batch_size(batch_size)
+    net = self.lstm_net
+    cont_input = np.zeros_like(net.blobs['cont_sentence'].data)
+    word_input = np.zeros_like(net.blobs['input_sentence'].data)
+    image_features = np.zeros_like(net.blobs['image_features'].data)
+    image_features[:] = descriptor
+    outputs = []
+    output_captions = [[] for b in range(batch_size)]
+    output_probs = [[] for b in range(batch_size)]
+    caption_index = 0
+    num_done = 0
+    cont_input[:] = 0
+    word_input[:] = 0
+
+    # net.forward(image_features=image_features, cont_sentence=cont_input, input_sentence=word_input)
+    # cont_input[:] = 1
+
+    # net_output_probs = net.blobs['probs'].data[0]
+    # topwords, idx_words, prob_words = self.get_top_words(net_output_probs)
+
+    breadth = 1
+    tprob = np.zeros(breadth)
+    tword = [[]for i in range(breadth)]
+
+    # for i,word in enumerate(range(breadth)):
+      # tprob[i],tword[i] = self.traverse2(100,0,caption_index,image_features,cont_input,word_input,net,i)
+    # print tprob
+    # print tword
+
+    probs = list()
+    sentences = list()
+    for i,word in enumerate(range(3)):
+      net = self.lstm_net
+
+      prob,sentence = self.traverse2(50,0,caption_index,image_features,cont_input,word_input,net,i)
+      probs.append(prob)
+      sentences.append(sentence)
+
+      # descriptor = np.array(descriptor)
+      # batch_size = descriptor.shape[0]
+      # self.set_caption_batch_size(batch_size)
+      self.lstm_net = caffe.Net(self.lstm_net_proto, self.weights_path, self.phase)
+      self.set_caption_batch_size(batch_size)
+
+    for i,sent in enumerate(sentences):
+      print sent + ": " + str(probs[i])
+
+
+    sys.stdout.write('\n')
+
+    return tword[tprob.argmax()],tprob[tprob.argmax()]
+
 
   def sentence(self, vocab_indices):
     sentence = ' '.join([self.vocab[i] for i in vocab_indices])
